@@ -33,32 +33,25 @@ class ArticleContent:
 
 
 class AIGenerator:
-    SYSTEM_PROMPT = """你是一名资深的微信公众号文案编辑，擅长撰写图文并茂、吸引读者的公众号文章。
-请根据提供的图片文件名，创作一篇高质量的微信公众号文章。
+    SYSTEM_PROMPT = """你是一名微信公众号头像选集编辑。请根据图片文件名生成选集标题、图片说明和草稿摘要。
 
 要求：
 1. 标题要吸引人，具有传播力，50字以内，不要用书名号，固定前缀为： WeChat ins小众高级个性头像10张 |
-2. 开头要有引人入胜的引导语
-3. 为每张图片配一段说明文字，描述图片内容并赋予情感或故事性
-4. 段落之间要有自然的过渡
-5. 结尾要有总结或互动引导
-6. 语言风格：温暖、真诚、有画面感，适合公众号读者
-7. 全文控制在800-1500字左右
-8. 🔴 最重要：你的整个回复必须是【纯 JSON】，不能有任何额外的开场白、解释、Markdown 标记、代码块、
+2. 不生成文章开场白、过渡段、结尾总结或互动引导。
+3. 图片说明只描述对应图片，摘要只简要概括头像主题和风格，避免问句和情景铺垫。
+4. 🔴 最重要：你的整个回复必须是【纯 JSON】，不能有任何额外的开场白、解释、Markdown 标记、代码块、
    或"以下是..."之类的文字。直接从 { 开始，到 } 结束。"""
 
     OUTPUT_SCHEMA = """
 必须严格按照以下 JSON 结构返回（只返回 JSON 本身，不包含 ```json 或任何说明文字）：
 {
     "title": "文章标题，20字以内",
-    "intro": "开头引导段落",
     "sections": [
         {"image_index": 0, "caption": "图1上方小标题（可选，可为空字符串）", "description": "图1的详细说明文字"},
         {"image_index": 1, "caption": "图2小标题", "description": "图2的详细说明文字"},
         {"image_index": N, "caption": "...", "description": "..."}
     ],
-    "outro": "结尾段落",
-    "digest": "文章摘要，不超过120字"
+    "digest": "简短的头像主题和风格说明，用于草稿摘要，不超过120字"
 }
 注意：sections 数组的长度必须严格等于图片数量。image_index 必须从 0 开始按顺序递增。
 """
@@ -75,7 +68,7 @@ class AIGenerator:
 以下是本次文章使用的 {len(filenames)} 张图片（按顺序）：
 {file_list}
 
-请为这些图片创作一篇完整的微信公众号文章。sections 数组的长度必须等于图片数量 {len(filenames)}，
+请按下面的 JSON 结构生成内容。sections 数组的长度必须等于图片数量 {len(filenames)}，
 image_index 从 0 到 {len(filenames) - 1} 依次对应每张图片。
 
 {self.OUTPUT_SCHEMA}
@@ -182,7 +175,7 @@ image_index 从 0 到 {len(filenames) - 1} 依次对应每张图片。
             raise AIGenerationError(f"未找到JSON内容，原始文本: {text[:500]}")
 
     def _validate_content(self, data: Dict[str, Any], expected_images: int) -> None:
-        required_keys = ["title", "intro", "sections", "outro"]
+        required_keys = ["title", "sections"]
         for k in required_keys:
             if k not in data:
                 raise AIGenerationError(f"生成内容缺少必填字段: {k}")
@@ -217,9 +210,9 @@ image_index 从 0 到 {len(filenames) - 1} 依次对应每张图片。
 
         content = ArticleContent(
             title=data["title"].strip(),
-            intro=data["intro"].strip(),
+            intro="",
             sections=data["sections"],
-            outro=data["outro"].strip(),
+            outro="",
             digest=data.get("digest", "")[:120].strip(),
         )
 
@@ -238,8 +231,8 @@ image_index 从 0 到 {len(filenames) - 1} 依次对应每张图片。
             })
         return ArticleContent(
             title="每日美图精选",
-            intro="今天为大家带来一组精选图片，希望能给你的一天带来一份美好与宁静。",
+            intro="",
             sections=sections,
-            outro="感谢你的阅读与陪伴，愿每一张图片都能在你心中留下一抹温暖。我们明天再见！",
-            digest="每日精选美图，带你感受生活中的美好瞬间。",
+            outro="",
+            digest="每日精选头像合集。",
         )

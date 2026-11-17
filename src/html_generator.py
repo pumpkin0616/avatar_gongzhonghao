@@ -127,27 +127,6 @@ class HTMLGenerator:
 </section>"""
 
     @classmethod
-    def _render_intro(cls, text: str) -> str:
-        """引导语：粉色左边框背景段落"""
-        style = (
-            "line-height: 1.8em;"
-            "letter-spacing: 0.5px;"
-            "font-size: 15px;"
-            "color: #555;"
-            "margin: 16px 0 16px 0;"
-            "padding: 14px 16px;"
-            f"background-color: {cls.ACCENT_BG}22;"
-            f"border-left: 3px solid {cls.ACCENT_COLOR};"
-            "border-radius: 4px;"
-        )
-        paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
-        body = "".join(
-            f'<p style="margin:0 0 10px 0">{html_escape(p)}</p>'
-            for p in paragraphs
-        ).rstrip()
-        return f'<section style="{style}">{body}</section>'
-
-    @classmethod
     def _render_cta(cls, text: str = "拿图吱一声~点个赞也行❤️") -> str:
         """底部 CTA 互动区"""
         return f"""
@@ -158,22 +137,6 @@ class HTMLGenerator:
     </section>
   </section>
 </section>"""
-
-    @classmethod
-    def _render_outro(cls, text: str) -> str:
-        """结尾文字段落（居中）"""
-        style = (
-            "text-align: center;"
-            "line-height: 1.8em;"
-            "letter-spacing: 0.5px;"
-            "font-size: 15px;"
-            "color: #777;"
-            "margin: 20px 0 8px 0;"
-            "padding: 12px 16px;"
-        )
-        paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
-        body = "".join(f'<p style="margin:0 0 8px 0">{html_escape(p)}</p>' for p in paragraphs)
-        return f'<section style="{style}">{body}</section>'
 
     @staticmethod
     def _guess_ext(url: str, fallback: str = "png") -> str:
@@ -216,7 +179,6 @@ class HTMLGenerator:
         parts.append(self.ROOT_START)
 
         parts.append(self._render_top_title_bar(content.title))
-        parts.append(self._render_intro(content.intro))
 
         i = 0
         block_index = 0
@@ -255,7 +217,6 @@ class HTMLGenerator:
 
         # 结尾
         parts.append(self._render_decoration_divider())
-        parts.append(self._render_outro(content.outro))
         parts.append(self._render_cta())
 
         parts.append(self.ROOT_END)
