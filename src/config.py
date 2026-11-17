@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+MAX_CONTENT_IMAGE_BYTES = 10 * 1024 * 1024
 
 
 @dataclass

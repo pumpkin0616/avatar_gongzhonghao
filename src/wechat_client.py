@@ -10,7 +10,7 @@ from dataclasses import dataclass
 import requests
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-from .config import config
+from .config import MAX_CONTENT_IMAGE_BYTES, config
 from .logger import logger
 
 
@@ -166,7 +166,7 @@ class WeChatClient:
         if not image_path.exists():
             raise FileNotFoundError(f"图片不存在: {image_path}")
 
-        if image_path.stat().st_size > 10 * 1024 * 1024:
+        if image_path.stat().st_size > MAX_CONTENT_IMAGE_BYTES:
             raise ValueError(f"图片 {image_path.name} 超过10MB限制")
 
         ext = image_path.suffix.lower()

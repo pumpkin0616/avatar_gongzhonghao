@@ -1,11 +1,12 @@
 import shutil
 import json
 import random
+from stat import S_ISREG
 from pathlib import Path
 from typing import List, Optional
 from datetime import datetime
 
-from .config import config
+from .config import MAX_CONTENT_IMAGE_BYTES, config
 from .logger import logger
 
 
@@ -42,14 +43,25 @@ class ImageTransaction:
 
     @staticmethod
     def list_all_images(directory: Path) -> List[Path]:
-        """列出目录下所有支持格式的图片文件（按文件名排序）"""
+        """按文件名列出格式受支持且大小不超过正文上传限制的图片。"""
         if not directory.exists():
             return []
-        return [
-            p
-            for p in sorted(directory.iterdir())
-            if p.is_file() and p.suffix.lower() in ALLOWED_EXTENSIONS
-        ]
+
+        images = []
+        for path in sorted(directory.iterdir()):
+            if path.suffix.lower() not in ALLOWED_EXTENSIONS:
+                continue
+            try:
+                file_info = path.stat()
+            except FileNotFoundError:
+                continue
+            if not S_ISREG(file_info.st_mode):
+                continue
+            if file_info.st_size > MAX_CONTENT_IMAGE_BYTES:
+                logger.debug("跳过超过 10 MB 的图片: %s", path.name)
+                continue
+            images.append(path)
+        return images
 
     @staticmethod
     def count_images(directory: Path) -> int:
@@ -63,7 +75,7 @@ class ImageTransaction:
         all_images = self._list_all_images(self.images_dir)
         if len(all_images) < self.images_per_article:
             raise ImageManagerError(
-                f"图片不足！images/ 中只有 {len(all_images)} 张图片，"
+                f"图片不足！images/ 中只有 {len(all_images)} 张可用图片，"
                 f"需要至少 {self.images_per_article} 张"
             )
 
