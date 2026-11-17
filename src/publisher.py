@@ -2,14 +2,15 @@ import json
 import traceback
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Optional, List
+from typing import Iterable, Optional, List
 from datetime import datetime
 
-from .config import config
+from .config import BASE_DIR, config
 from .logger import logger
 from .image_manager import ImageTransaction, ImageManagerError
 from .ai_generator import AIGenerator, ArticleContent, AIGenerationError
 from .html_generator import HTMLGenerator
+from .title_history import TitleHistory
 from .wechat_client import WeChatClient, WeChatAPIError, WeChatDraftResult
 
 
@@ -70,6 +71,7 @@ class Publisher:
         self.html = html_generator or HTMLGenerator()
         self.state_dir = config.article.temp_dir / "states"
         self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.titles = TitleHistory(self.state_dir)
 
     def _new_state(self) -> PublishState:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -84,6 +86,39 @@ class Publisher:
     def _persist_state(self, state: PublishState):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         state.save(self.state_dir / f"state_{ts}.json")
+
+    def _generate_article(
+        self,
+        image_paths: List[Path],
+        *,
+        reserve_title: bool,
+        use_fallback_on_ai_failure: bool = True,
+        excluded_titles: Iterable[str] = (),
+    ) -> ArticleContent:
+        try:
+            for _ in range(2):
+                article = self.ai.generate_article(image_paths)
+                title = self.titles.choose(
+                    article.title_candidates, reserve=reserve_title, excluded_titles=excluded_titles
+                )
+                if title:
+                    article.title = title
+                    return article
+                logger.info("标题候选与历史标题过于相似，重新选取")
+            raise AIGenerationError("AI 未生成与历史标题有区分度的候选")
+        except AIGenerationError as exc:
+            if not use_fallback_on_ai_failure:
+                raise
+            logger.warning(f"AI 标题生成失败，尝试预设短句: {exc}")
+
+        article = self.ai.generate_fallback_content(image_paths)
+        title = self.titles.choose(
+            article.title_candidates, reserve=reserve_title, excluded_titles=excluded_titles
+        )
+        if not title:
+            raise AIGenerationError("没有可用的预设标题，请重试 AI 生成")
+        article.title = title
+        return article
 
     def run_once(self, use_fallback_on_ai_failure: bool = True) -> PublishResult:
         logger.info("=" * 60)
@@ -113,15 +148,11 @@ class Publisher:
             logger.info(f"[阶段2/6] 事务已开始，图片已移入 pending 目录")
 
             state.phase = "ai_generate"
-            try:
-                article: ArticleContent = self.ai.generate_article(pending_images)
-            except AIGenerationError as e:
-                logger.error(f"AI 生成内容失败: {e}")
-                if use_fallback_on_ai_failure:
-                    logger.warning("使用兜底内容继续发布流程")
-                    article = self.ai.generate_fallback_content(pending_images)
-                else:
-                    raise
+            article = self._generate_article(
+                pending_images,
+                reserve_title=True,
+                use_fallback_on_ai_failure=use_fallback_on_ai_failure,
+            )
             state.article_title = article.title
             self._persist_state(state)
             logger.info(f"[阶段3/6] AI 生成文章成功: {article.title}")
@@ -335,6 +366,7 @@ class Publisher:
             )
 
         preview_paths: List[Path] = []
+        preview_titles: set[str] = set()
         article_no = 0
         remaining = available
         offset = 0
@@ -342,11 +374,10 @@ class Publisher:
         while remaining > threshold:
             chunk = all_images[offset : offset + threshold]
             article_no += 1
-            try:
-                article: ArticleContent = self.ai.generate_article(chunk)
-            except AIGenerationError as e:
-                logger.error(f"第 {article_no} 篇 AI 生成失败，使用兜底: {e}")
-                article = self.ai.generate_fallback_content(chunk)
+            article = self._generate_article(
+                chunk, reserve_title=False, excluded_titles=preview_titles
+            )
+            preview_titles.add(article.title)
 
             demo_urls = self._load_demo_wechat_image_urls(need=len(chunk))
             html_content = self.html.generate(article, demo_urls)
@@ -404,11 +435,7 @@ class Publisher:
             logger.info(f"[阶段1/3 DRY] 选取图片: {len(selected)} 张")
 
             state.phase = "ai_generate"
-            try:
-                article: ArticleContent = self.ai.generate_article(selected)
-            except AIGenerationError as e:
-                logger.error(f"AI 生成失败，使用兜底: {e}")
-                article = self.ai.generate_fallback_content(selected)
+            article = self._generate_article(selected, reserve_title=False)
             state.article_title = article.title
             self._persist_state(state)
             logger.info(f"[阶段2/3 DRY] AI 生成文章: {article.title}")
@@ -445,7 +472,7 @@ class Publisher:
         """
         import re as _re
         urls: List[str] = []
-        test_html = config.BASE_DIR / "test.html"
+        test_html = BASE_DIR / "test.html"
         if test_html.exists():
             try:
                 text = test_html.read_text(encoding="utf-8")

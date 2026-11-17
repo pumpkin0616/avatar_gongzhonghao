@@ -1,9 +1,10 @@
 import json
 import re
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Iterable, Optional
 from pathlib import Path
 
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from requests import RequestException
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from .config import config
 from .logger import logger
@@ -21,58 +22,45 @@ class ArticleContent:
         sections: List[Dict[str, str]],
         outro: str,
         digest: str = "",
+        title_candidates: Optional[List[str]] = None,
     ):
         self.title = title
         self.intro = intro
         self.sections = sections
         self.outro = outro
         self.digest = digest or intro[:120]
+        self.title_candidates = title_candidates or [title]
 
     def __repr__(self):
         return f"ArticleContent(title={self.title!r}, sections={len(self.sections)})"
 
 
 class AIGenerator:
-    SYSTEM_PROMPT = """你是一名微信公众号头像选集编辑。请根据图片文件名生成选集标题、图片说明和草稿摘要。
+    SYSTEM_PROMPT = """为微信公众号写 5 条通用的文艺标题短句，每条不超过 20 字。
+每条用不同的意象和句式，可以写日常、季节、城市、独处或心情，不描述图片。
+语言自然克制，避免「每一张都是故事」「一眼心动的氛围感」「换个头像换个心情」这类套话。
+短句只作为标题后半句，不加头像字样、固定前缀、书名号、序号或竖线。
+只返回一个 JSON 对象，titles 字段为短句数组。"""
 
-要求：
-1. 标题要吸引人，具有传播力，50字以内，不要用书名号，固定前缀为： WeChat ins小众高级个性头像10张 |
-2. 不生成文章开场白、过渡段、结尾总结或互动引导。
-3. 图片说明只描述对应图片，摘要只简要概括头像主题和风格，避免问句和情景铺垫。
-4. 🔴 最重要：你的整个回复必须是【纯 JSON】，不能有任何额外的开场白、解释、Markdown 标记、代码块、
-   或"以下是..."之类的文字。直接从 { 开始，到 } 结束。"""
-
-    OUTPUT_SCHEMA = """
-必须严格按照以下 JSON 结构返回（只返回 JSON 本身，不包含 ```json 或任何说明文字）：
-{
-    "title": "文章标题，20字以内",
-    "sections": [
-        {"image_index": 0, "caption": "图1上方小标题（可选，可为空字符串）", "description": "图1的详细说明文字"},
-        {"image_index": 1, "caption": "图2小标题", "description": "图2的详细说明文字"},
-        {"image_index": N, "caption": "...", "description": "..."}
-    ],
-    "digest": "简短的头像主题和风格说明，用于草稿摘要，不超过120字"
-}
-注意：sections 数组的长度必须严格等于图片数量。image_index 必须从 0 开始按顺序递增。
-"""
+    FALLBACK_TITLES = (
+        "晚风替我关了灯",
+        "给日常留一扇窗",
+        "星期天没有闹钟",
+        "慢车经过旧城",
+        "把春天折进书页",
+        "写给自己的一行小字",
+        "街角的灯依次亮起",
+        "雨停在九点过后",
+        "海那边也有黄昏",
+        "明天见，今天就到这里",
+        "两站路的闲暇",
+        "橘子要留到晴天吃",
+    )
 
     def __init__(self):
         self.api_key = config.ai.api_key
         self.base_url = config.ai.base_url.rstrip("/")
         self.model = config.ai.model
-
-    def _build_user_prompt(self, image_paths: List[Path]) -> str:
-        filenames = [p.name for p in image_paths]
-        file_list = "\n".join(f"  [{i}] {name}" for i, name in enumerate(filenames))
-        return f"""
-以下是本次文章使用的 {len(filenames)} 张图片（按顺序）：
-{file_list}
-
-请按下面的 JSON 结构生成内容。sections 数组的长度必须等于图片数量 {len(filenames)}，
-image_index 从 0 到 {len(filenames) - 1} 依次对应每张图片。
-
-{self.OUTPUT_SCHEMA}
-"""
 
     def _is_deepseek_like(self) -> bool:
         return "deepseek" in self.base_url.lower() or "deepseek" in self.model.lower()
@@ -112,7 +100,7 @@ image_index 从 0 到 {len(filenames) - 1} 依次对应每张图片。
         logger.info(
             f"调用 LLM [{self.model}] @ {self.base_url}"
             f" (JSON模式: {'是' if use_json_mode else '否（提示词约束）'}"
-            " 生成文章内容..."
+            " 生成标题候选..."
         )
 
         try:
@@ -174,65 +162,55 @@ image_index 从 0 到 {len(filenames) - 1} 依次对应每张图片。
                     raise AIGenerationError(f"无法解析JSON内容: {e}\n原始内容: {text[:500]}")
             raise AIGenerationError(f"未找到JSON内容，原始文本: {text[:500]}")
 
-    def _validate_content(self, data: Dict[str, Any], expected_images: int) -> None:
-        required_keys = ["title", "sections"]
-        for k in required_keys:
-            if k not in data:
-                raise AIGenerationError(f"生成内容缺少必填字段: {k}")
+    @staticmethod
+    def _build_content(image_paths: List[Path], suffixes: Iterable[str]) -> ArticleContent:
+        article_config = config.article
+        prefix = article_config.title_prefix.strip().rstrip("|｜").rstrip()
+        title_start = f"{prefix} | " if prefix else ""
+        candidates = []
+        for suffix in suffixes:
+            if not isinstance(suffix, str):
+                continue
+            suffix = suffix.strip()
+            if not suffix or len(suffix) > 20 or any(c in suffix for c in "|｜《》\n\r"):
+                continue
+            title = title_start + suffix
+            if len(title) <= 50:
+                candidates.append(title)
 
-        sections = data["sections"]
-        if not isinstance(sections, list) or len(sections) != expected_images:
-            raise AIGenerationError(
-                f"sections 数量错误: 期望 {expected_images}, 实际 {len(sections) if isinstance(sections, list) else '非数组'}"
-            )
+        if not candidates:
+            raise AIGenerationError("没有符合长度和格式要求的标题候选")
 
-        for i, sec in enumerate(sections):
-            if not isinstance(sec, dict) or "image_index" not in sec or "description" not in sec:
-                raise AIGenerationError(f"sections[{i}] 格式错误，需要 image_index 和 description 字段")
-            if sec["image_index"] != i:
-                logger.warning(f"sections[{i}] 的 image_index={sec['image_index']} 与位置不匹配，已自动修正")
-                sec["image_index"] = i
+        return ArticleContent(
+            title=candidates[0],
+            intro="",
+            sections=[
+                {"image_index": i, "caption": "", "description": ""}
+                for i in range(len(image_paths))
+            ],
+            outro="",
+            digest=article_config.digest or f"本期精选 {len(image_paths)} 张头像。",
+            title_candidates=candidates,
+        )
 
     def generate_article(self, image_paths: List[Path]) -> ArticleContent:
         if not image_paths:
             raise AIGenerationError("图片列表为空，无法生成文章")
 
-        messages = [
-            {"role": "system", "content": self.SYSTEM_PROMPT},
-            {"role": "user", "content": self._build_user_prompt(image_paths)},
-        ]
-
-        raw_text = self._call_llm(messages)
+        messages = [{"role": "user", "content": self.SYSTEM_PROMPT}]
+        try:
+            raw_text = self._call_llm(messages)
+        except RequestException as exc:
+            raise AIGenerationError("AI 标题请求失败") from exc
         logger.debug(f"LLM 原始返回 (前500字符): {raw_text[:500]}")
 
         data = self._parse_json(raw_text)
-        self._validate_content(data, len(image_paths))
-
-        content = ArticleContent(
-            title=data["title"].strip(),
-            intro="",
-            sections=data["sections"],
-            outro="",
-            digest=data.get("digest", "")[:120].strip(),
-        )
-
-        logger.info(f"文章生成成功，标题: {content.title}，共 {len(content.sections)} 个图片段落")
-        return content
+        titles = data.get("titles") if isinstance(data, dict) else None
+        if not isinstance(titles, list):
+            raise AIGenerationError("AI 返回缺少 titles 数组")
+        return self._build_content(image_paths, titles)
 
     def generate_fallback_content(self, image_paths: List[Path]) -> ArticleContent:
         """当AI生成失败时的兜底内容"""
-        logger.warning("使用兜底内容生成文章")
-        sections = []
-        for i, p in enumerate(image_paths):
-            sections.append({
-                "image_index": i,
-                "caption": f"第 {i + 1} 幅",
-                "description": f"欣赏这张精美的图片，感受其中的意境与故事。每一个画面都值得我们细细品味，在光影流转间发现生活中的美好。",
-            })
-        return ArticleContent(
-            title="每日美图精选",
-            intro="",
-            sections=sections,
-            outro="",
-            digest="每日精选头像合集。",
-        )
+        logger.warning("使用预设文艺短句生成标题")
+        return self._build_content(image_paths, self.FALLBACK_TITLES)
